@@ -167,8 +167,8 @@ public class AvroSchemaConverter {
     return types;
   }
 
-  private Type convertField(String fieldName, Schema schema, String schemaPath) {
-    return convertField(fieldName, schema, Type.Repetition.REQUIRED, schemaPath, MAX_RECURSIVE_DEPTH);
+  private Type convertField(String fieldName, Schema schema, String schemaPath, int depth) {
+    return convertField(fieldName, schema, Type.Repetition.REQUIRED, schemaPath, depth);
   }
 
   @SuppressWarnings("deprecation")
@@ -210,11 +210,11 @@ public class AvroSchemaConverter {
         );
       } else {
         return ConversionPatterns.listOfElements(repetition, fieldName,
-            convertField(AvroWriteSupport.LIST_ELEMENT_NAME, schema.getElementType(), schemaPath)
+            convertField(AvroWriteSupport.LIST_ELEMENT_NAME, schema.getElementType(), schemaPath, depth)
         );
       }
     } else if (type.equals(Schema.Type.MAP)) {
-      Type valType = convertField("value", schema.getValueType(), schemaPath);
+      Type valType = convertField("value", schema.getValueType(), schemaPath, depth);
       // avro map key type is always string
       return ConversionPatterns.stringKeyMapType(repetition, fieldName, valType);
     } else if (type.equals(Schema.Type.FIXED)) {
@@ -228,7 +228,7 @@ public class AvroSchemaConverter {
         builder = Types.primitive(FIXED_LEN_BYTE_ARRAY, repetition).length(schema.getFixedSize());
       }
     } else if (type.equals(Schema.Type.UNION)) {
-      return convertUnion(fieldName, schema, repetition, schemaPath);
+      return convertUnion(fieldName, schema, repetition, schemaPath, depth);
     } else {
       throw new UnsupportedOperationException("Cannot convert Avro type " + type);
     }
@@ -250,7 +250,13 @@ public class AvroSchemaConverter {
     return builder.named(fieldName);
   }
 
-  private Type convertUnion(String fieldName, Schema schema, Type.Repetition repetition, String schemaPath) {
+  private Type convertUnion(
+      String fieldName,
+      Schema schema,
+      Type.Repetition repetition,
+      String schemaPath,
+      final int depth
+  ) {
     List<Schema> nonNullSchemas = new ArrayList<Schema>(schema.getTypes().size());
     // Found any schemas in the union? Required for the edge case, where the union contains only a single type.
     boolean foundNullSchema = false;
@@ -276,17 +282,17 @@ public class AvroSchemaConverter {
             nonNullSchemas.get(0),
             repetition,
             schemaPath,
-            MAX_RECURSIVE_DEPTH
+            depth
         ) :
-            convertUnionToGroupType(fieldName, repetition, nonNullSchemas, schemaPath);
+            convertUnionToGroupType(fieldName, repetition, nonNullSchemas, schemaPath, depth);
 
       default: // complex union type
-        return convertUnionToGroupType(fieldName, repetition, nonNullSchemas, schemaPath);
+        return convertUnionToGroupType(fieldName, repetition, nonNullSchemas, schemaPath, depth);
     }
   }
 
   private Type convertUnionToGroupType(String fieldName, Type.Repetition repetition, List<Schema> nonNullSchemas,
-      String schemaPath) {
+      String schemaPath, int depth) {
     List<Type> unionTypes = new ArrayList<Type>(nonNullSchemas.size());
     int index = 0;
     for (Schema childSchema : nonNullSchemas) {
@@ -295,14 +301,14 @@ public class AvroSchemaConverter {
           childSchema,
           Type.Repetition.OPTIONAL,
           schemaPath,
-          MAX_RECURSIVE_DEPTH
+          depth
       ));
     }
     return new GroupType(repetition, fieldName, unionTypes);
   }
 
   private Type convertField(Schema.Field field, String schemaPath, int depth) {
-    return convertField(field.name(), field.schema(), schemaPath);
+    return convertField(field.name(), field.schema(), schemaPath, depth);
   }
 
   public Schema convert(MessageType parquetSchema) {
@@ -314,7 +320,7 @@ public class AvroSchemaConverter {
   }
 
   private Schema convertFields(String name, List<Type> parquetFields, Map<String, Integer> names) {
-    List<Schema.Field> fields = new ArrayList<Schema.Field>();
+    List<Schema.Field> fields = new ArrayList<>();
     Integer nameCount = names.merge(name, 1, (oldValue, value) -> oldValue + 1);
     for (Type parquetType : parquetFields) {
       Schema fieldSchema = convertField(parquetType, names);
