@@ -18,31 +18,6 @@
  */
 package org.apache.parquet.avro;
 
-import org.apache.avro.LogicalType;
-import org.apache.avro.LogicalTypes;
-import org.apache.avro.Schema;
-
-import org.apache.hadoop.conf.Configuration;
-import org.apache.parquet.schema.ConversionPatterns;
-import org.apache.parquet.schema.GroupType;
-import org.apache.parquet.schema.LogicalTypeAnnotation;
-import org.apache.parquet.schema.MessageType;
-import org.apache.parquet.schema.PrimitiveType;
-import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName;
-import org.apache.parquet.schema.Type;
-import org.apache.parquet.schema.Types;
-import org.apache.parquet.schema.LogicalTypeAnnotation.UUIDLogicalTypeAnnotation;
-
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
-import java.util.Set;
-
 import static java.util.Optional.empty;
 import static java.util.Optional.of;
 import static org.apache.avro.JsonProperties.NULL_VALUE;
@@ -62,8 +37,38 @@ import static org.apache.parquet.schema.LogicalTypeAnnotation.stringType;
 import static org.apache.parquet.schema.LogicalTypeAnnotation.timeType;
 import static org.apache.parquet.schema.LogicalTypeAnnotation.timestampType;
 import static org.apache.parquet.schema.LogicalTypeAnnotation.uuidType;
-import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.*;
+import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.BINARY;
+import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.BOOLEAN;
+import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.DOUBLE;
+import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.FIXED_LEN_BYTE_ARRAY;
+import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.FLOAT;
+import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT32;
+import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT64;
 import static org.apache.parquet.schema.Type.Repetition.REPEATED;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+
+import org.apache.avro.LogicalType;
+import org.apache.avro.LogicalTypes;
+import org.apache.avro.Schema;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.parquet.schema.ConversionPatterns;
+import org.apache.parquet.schema.GroupType;
+import org.apache.parquet.schema.LogicalTypeAnnotation;
+import org.apache.parquet.schema.LogicalTypeAnnotation.UUIDLogicalTypeAnnotation;
+import org.apache.parquet.schema.MessageType;
+import org.apache.parquet.schema.PrimitiveType;
+import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName;
+import org.apache.parquet.schema.Type;
+import org.apache.parquet.schema.Types;
 
 /**
  * <p>
@@ -82,6 +87,7 @@ public class AvroSchemaConverter {
   private final boolean writeParquetUUID;
   private final boolean readInt96AsFixed;
   private final Set<String> pathsToInt96;
+  private static final int MAX_RECURSIVE_DEPTH = 8; // This is arbitrary.
 
   public AvroSchemaConverter() {
     this(ADD_LIST_ELEMENT_RECORDS_DEFAULT);
@@ -141,26 +147,32 @@ public class AvroSchemaConverter {
     if (!avroSchema.getType().equals(Schema.Type.RECORD)) {
       throw new IllegalArgumentException("Avro schema must be a record.");
     }
-    return new MessageType(avroSchema.getFullName(), convertFields(avroSchema.getFields(), ""));
+    return new MessageType(avroSchema.getFullName(), convertFields(avroSchema.getFields(), "", MAX_RECURSIVE_DEPTH));
   }
 
-  private List<Type> convertFields(List<Schema.Field> fields, String schemaPath) {
+  private List<Type> convertFields(List<Schema.Field> fields, String schemaPath, int depth) {
     List<Type> types = new ArrayList<Type>();
+
+    if (depth <= 0) {
+      return types;
+    }
+    depth--;
+
     for (Schema.Field field : fields) {
       if (field.schema().getType().equals(Schema.Type.NULL)) {
         continue; // Avro nulls are not encoded, unless they are null unions
       }
-      types.add(convertField(field, appendPath(schemaPath, field.name())));
+      types.add(convertField(field, appendPath(schemaPath, field.name()), depth));
     }
     return types;
   }
 
   private Type convertField(String fieldName, Schema schema, String schemaPath) {
-    return convertField(fieldName, schema, Type.Repetition.REQUIRED, schemaPath);
+    return convertField(fieldName, schema, Type.Repetition.REQUIRED, schemaPath, MAX_RECURSIVE_DEPTH);
   }
 
   @SuppressWarnings("deprecation")
-  private Type convertField(String fieldName, Schema schema, Type.Repetition repetition, String schemaPath) {
+  private Type convertField(String fieldName, Schema schema, Type.Repetition repetition, String schemaPath, int depth) {
     Types.PrimitiveBuilder<PrimitiveType> builder;
     Schema.Type type = schema.getType();
     LogicalType logicalType = schema.getLogicalType();
@@ -184,16 +196,22 @@ public class AvroSchemaConverter {
         builder = Types.primitive(BINARY, repetition).as(stringType());
       }
     } else if (type.equals(Schema.Type.RECORD)) {
-      return new GroupType(repetition, fieldName, convertFields(schema.getFields(), schemaPath));
+      if (depth <= 0) {
+        builder = Types.primitive(BINARY, repetition);
+      } else {
+        return new GroupType(repetition, fieldName, convertFields(schema.getFields(), schemaPath, depth));
+      }
     } else if (type.equals(Schema.Type.ENUM)) {
       builder = Types.primitive(BINARY, repetition).as(enumType());
     } else if (type.equals(Schema.Type.ARRAY)) {
       if (writeOldListStructure) {
         return ConversionPatterns.listType(repetition, fieldName,
-            convertField("array", schema.getElementType(), REPEATED, schemaPath));
+            convertField("array", schema.getElementType(), REPEATED, schemaPath, depth)
+        );
       } else {
         return ConversionPatterns.listOfElements(repetition, fieldName,
-            convertField(AvroWriteSupport.LIST_ELEMENT_NAME, schema.getElementType(), schemaPath));
+            convertField(AvroWriteSupport.LIST_ELEMENT_NAME, schema.getElementType(), schemaPath)
+        );
       }
     } else if (type.equals(Schema.Type.MAP)) {
       Type valType = convertField("value", schema.getValueType(), schemaPath);
@@ -253,8 +271,14 @@ public class AvroSchemaConverter {
         throw new UnsupportedOperationException("Cannot convert Avro union of only nulls");
 
       case 1:
-        return foundNullSchema ? convertField(fieldName, nonNullSchemas.get(0), repetition, schemaPath) :
-          convertUnionToGroupType(fieldName, repetition, nonNullSchemas, schemaPath);
+        return foundNullSchema ? convertField(
+            fieldName,
+            nonNullSchemas.get(0),
+            repetition,
+            schemaPath,
+            MAX_RECURSIVE_DEPTH
+        ) :
+            convertUnionToGroupType(fieldName, repetition, nonNullSchemas, schemaPath);
 
       default: // complex union type
         return convertUnionToGroupType(fieldName, repetition, nonNullSchemas, schemaPath);
@@ -266,12 +290,18 @@ public class AvroSchemaConverter {
     List<Type> unionTypes = new ArrayList<Type>(nonNullSchemas.size());
     int index = 0;
     for (Schema childSchema : nonNullSchemas) {
-      unionTypes.add( convertField("member" + index++, childSchema, Type.Repetition.OPTIONAL, schemaPath));
+      unionTypes.add(convertField(
+          "member" + index++,
+          childSchema,
+          Type.Repetition.OPTIONAL,
+          schemaPath,
+          MAX_RECURSIVE_DEPTH
+      ));
     }
     return new GroupType(repetition, fieldName, unionTypes);
   }
 
-  private Type convertField(Schema.Field field, String schemaPath) {
+  private Type convertField(Schema.Field field, String schemaPath, int depth) {
     return convertField(field.name(), field.schema(), schemaPath);
   }
 
